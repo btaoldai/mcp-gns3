@@ -106,6 +106,28 @@ pub struct GetTopologyParams {
     pub project_id: String,
 }
 
+/// Parameters for `gns3_export_project`.
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct ExportProjectParams {
+    /// UUID of the project to export.
+    #[schemars(description = "Project UUID")]
+    pub project_id: String,
+    /// Whether to include disk images in the export.
+    #[schemars(description = "Include disk images in export (true/false, defaults to false)")]
+    pub include_images: Option<bool>,
+}
+
+/// Parameters for `gns3_snapshot_project`.
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct SnapshotProjectParams {
+    /// UUID of the project.
+    #[schemars(description = "Project UUID")]
+    pub project_id: String,
+    /// Name for the snapshot.
+    #[schemars(description = "Snapshot name")]
+    pub name: String,
+}
+
 /// Handler for `gns3_close_project`.
 pub async fn close_project(
     api: &dyn Gns3Api,
@@ -185,6 +207,47 @@ pub async fn get_topology(
         }
     }
 
+    Ok(CallToolResult::success(vec![Content::text(text)]))
+}
+
+/// Handler for `gns3_export_project`.
+pub async fn export_project(
+    api: &dyn Gns3Api,
+    params: ExportProjectParams,
+) -> Result<CallToolResult, ErrorData> {
+    let project_id = parse_uuid(&params.project_id, "project")?;
+    let include_images = params.include_images.unwrap_or(false);
+
+    let result = api
+        .export_project(project_id, include_images)
+        .await
+        .map_err(to_mcp_error)?;
+
+    let size_mb = result.size_bytes / (1024 * 1024);
+    let size_kb = (result.size_bytes % (1024 * 1024)) / 1024;
+    let text = format!(
+        "Project exported successfully.\nProject ID: {}\nSize: {} MB {} KB\nFile: {}.gns3project",
+        project_id, size_mb, size_kb, project_id
+    );
+    Ok(CallToolResult::success(vec![Content::text(text)]))
+}
+
+/// Handler for `gns3_snapshot_project`.
+pub async fn snapshot_project(
+    api: &dyn Gns3Api,
+    params: SnapshotProjectParams,
+) -> Result<CallToolResult, ErrorData> {
+    let project_id = parse_uuid(&params.project_id, "project")?;
+
+    let snapshot = api
+        .snapshot_project(project_id, &params.name)
+        .await
+        .map_err(to_mcp_error)?;
+
+    let text = format!(
+        "Snapshot created successfully.\nSnapshot ID: {}\nName: {}\nCreated: {}\nProject: {}",
+        snapshot.snapshot_id, snapshot.name, snapshot.created_at, project_id
+    );
     Ok(CallToolResult::success(vec![Content::text(text)]))
 }
 
@@ -287,6 +350,66 @@ mod tests {
     async fn get_version_propagates_api_error() {
         let api = MockGns3ApiError;
         let err = get_version(&api).await.unwrap_err();
+        assert!(err.message.contains("connection refused"));
+    }
+
+    #[tokio::test]
+    async fn export_project_returns_size_info() {
+        let api = MockGns3Api;
+        let params = ExportProjectParams {
+            project_id: PROJECT_ID.to_string(),
+            include_images: Some(true),
+        };
+        let result = export_project(&api, params).await.unwrap();
+        let text = text_content(&result);
+        assert!(text.contains("Project exported successfully"));
+        assert!(text.contains(".gns3project"));
+    }
+
+    #[tokio::test]
+    async fn export_project_defaults_include_images_false() {
+        let api = MockGns3Api;
+        let params = ExportProjectParams {
+            project_id: PROJECT_ID.to_string(),
+            include_images: None,
+        };
+        let result = export_project(&api, params).await.unwrap();
+        let text = text_content(&result);
+        assert!(text.contains("exported successfully"));
+    }
+
+    #[tokio::test]
+    async fn export_project_error() {
+        let api = MockGns3ApiError;
+        let params = ExportProjectParams {
+            project_id: PROJECT_ID.to_string(),
+            include_images: Some(false),
+        };
+        let err = export_project(&api, params).await.unwrap_err();
+        assert!(err.message.contains("connection refused"));
+    }
+
+    #[tokio::test]
+    async fn snapshot_project_returns_snapshot_info() {
+        let api = MockGns3Api;
+        let params = SnapshotProjectParams {
+            project_id: PROJECT_ID.to_string(),
+            name: "Backup-v1".to_string(),
+        };
+        let result = snapshot_project(&api, params).await.unwrap();
+        let text = text_content(&result);
+        assert!(text.contains("Snapshot created successfully"));
+        assert!(text.contains("Backup-v1"));
+    }
+
+    #[tokio::test]
+    async fn snapshot_project_error() {
+        let api = MockGns3ApiError;
+        let params = SnapshotProjectParams {
+            project_id: PROJECT_ID.to_string(),
+            name: "ShouldFail".to_string(),
+        };
+        let err = snapshot_project(&api, params).await.unwrap_err();
         assert!(err.message.contains("connection refused"));
     }
 

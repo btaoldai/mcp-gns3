@@ -7,7 +7,8 @@ use serde::de::DeserializeOwned;
 use uuid::Uuid;
 
 use gns3_mcp_core::{
-    Compute, CreateNodeRequest, Gns3Error, Link, LinkEndpoint, Node, Project, Template, Version,
+    AddDrawingRequest, Compute, CreateNodeRequest, Drawing, ExportResult, Gns3Error, Link,
+    LinkEndpoint, Node, Project, Snapshot, SwitchPort, Template, UpdateNodeRequest, Version,
 };
 
 use crate::config::Gns3ClientConfig;
@@ -83,7 +84,7 @@ impl Gns3Client {
             let response = req
                 .send()
                 .await
-                .map_err(|e| Gns3Error::Http(e.to_string()))?;
+                .map_err(|e| Gns3Error::Network(e.to_string()))?;
 
             let status = response.status();
 
@@ -110,7 +111,7 @@ impl Gns3Client {
                     .text()
                     .await
                     .unwrap_or_else(|_| "no response body".to_string());
-                return Err(Gns3Error::Api {
+                return Err(Gns3Error::Http {
                     status: status.as_u16(),
                     message,
                 });
@@ -142,7 +143,7 @@ impl Gns3Client {
             let response = req
                 .send()
                 .await
-                .map_err(|e| Gns3Error::Http(e.to_string()))?;
+                .map_err(|e| Gns3Error::Network(e.to_string()))?;
 
             let status = response.status();
 
@@ -169,7 +170,7 @@ impl Gns3Client {
                     .text()
                     .await
                     .unwrap_or_else(|_| "no response body".to_string());
-                return Err(Gns3Error::Api {
+                return Err(Gns3Error::Http {
                     status: status.as_u16(),
                     message,
                 });
@@ -178,7 +179,7 @@ impl Gns3Client {
             let body = response
                 .text()
                 .await
-                .map_err(|e| Gns3Error::Http(e.to_string()))?;
+                .map_err(|e| Gns3Error::Network(e.to_string()))?;
 
             if body.is_empty() {
                 let http = self.http.clone();
@@ -207,7 +208,7 @@ impl Gns3Client {
             let response = req
                 .send()
                 .await
-                .map_err(|e| Gns3Error::Http(e.to_string()))?;
+                .map_err(|e| Gns3Error::Network(e.to_string()))?;
 
             let status = response.status();
 
@@ -234,7 +235,7 @@ impl Gns3Client {
                     .text()
                     .await
                     .unwrap_or_else(|_| "no response body".to_string());
-                return Err(Gns3Error::Api {
+                return Err(Gns3Error::Http {
                     status: status.as_u16(),
                     message,
                 });
@@ -259,7 +260,7 @@ impl Gns3Client {
             let response = req
                 .send()
                 .await
-                .map_err(|e| Gns3Error::Http(e.to_string()))?;
+                .map_err(|e| Gns3Error::Network(e.to_string()))?;
 
             let status = response.status();
 
@@ -286,7 +287,7 @@ impl Gns3Client {
                     .text()
                     .await
                     .unwrap_or_else(|_| "no response body".to_string());
-                return Err(Gns3Error::Api {
+                return Err(Gns3Error::Http {
                     status: status.as_u16(),
                     message,
                 });
@@ -427,5 +428,122 @@ impl gns3_mcp_core::Gns3Api for Gns3Client {
             &self.url(&format!("/v2/projects/{project_id}/nodes")),
         )
         .await
+    }
+
+    async fn update_node(
+        &self,
+        project_id: Uuid,
+        node_id: Uuid,
+        update: UpdateNodeRequest,
+    ) -> Result<Node, Gns3Error> {
+        let http = self.http.clone();
+        let url = self.url(&format!("/v2/projects/{project_id}/nodes/{node_id}"));
+        self.send(move || http.put(&url).json(&update)).await
+    }
+
+    async fn update_template(
+        &self,
+        template_id: Uuid,
+        properties: serde_json::Value,
+    ) -> Result<serde_json::Value, Gns3Error> {
+        let http = self.http.clone();
+        let url = self.url(&format!("/v2/templates/{template_id}"));
+        self.send(move || http.put(&url).json(&properties)).await
+    }
+
+    async fn add_drawing(
+        &self,
+        project_id: Uuid,
+        request: AddDrawingRequest,
+    ) -> Result<Drawing, Gns3Error> {
+        let http = self.http.clone();
+        let url = self.url(&format!("/v2/projects/{project_id}/drawings"));
+        self.send(move || http.post(&url).json(&request)).await
+    }
+
+    async fn export_project(
+        &self,
+        project_id: Uuid,
+        include_images: bool,
+    ) -> Result<ExportResult, Gns3Error> {
+        let http = self.http.clone();
+        let query_param = if include_images { "yes" } else { "no" };
+        let url = self.url(&format!(
+            "/v2/projects/{project_id}/export?include_images={query_param}"
+        ));
+        let mut attempt = 0u32;
+        loop {
+            let req = self.auth(http.get(&url));
+            let response = req
+                .send()
+                .await
+                .map_err(|e| Gns3Error::Network(e.to_string()))?;
+
+            let status = response.status();
+
+            if status.is_server_error() && attempt < MAX_RETRIES {
+                let message = response
+                    .text()
+                    .await
+                    .unwrap_or_else(|_| "no response body".to_string());
+                let delay_ms = BACKOFF_BASE_MS * (1u64 << attempt);
+                tracing::warn!(
+                    attempt = attempt + 1,
+                    max_retries = MAX_RETRIES,
+                    status = status.as_u16(),
+                    delay_ms,
+                    "GNS3 server error — retrying after {delay_ms}ms: {message}"
+                );
+                tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+                attempt += 1;
+                continue;
+            }
+
+            if !status.is_success() {
+                let message = response
+                    .text()
+                    .await
+                    .unwrap_or_else(|_| "no response body".to_string());
+                return Err(Gns3Error::Http {
+                    status: status.as_u16(),
+                    message,
+                });
+            }
+
+            let bytes = response
+                .bytes()
+                .await
+                .map_err(|e| Gns3Error::Network(e.to_string()))?;
+            return Ok(ExportResult {
+                size_bytes: bytes.len(),
+            });
+        }
+    }
+
+    async fn configure_switch(
+        &self,
+        project_id: Uuid,
+        node_id: Uuid,
+        ports: Vec<SwitchPort>,
+    ) -> Result<Node, Gns3Error> {
+        let http = self.http.clone();
+        let url = self.url(&format!("/v2/projects/{project_id}/nodes/{node_id}"));
+        let body = serde_json::json!({
+            "properties": {
+                "ports_mapping": ports
+            }
+        });
+        self.send(move || http.put(&url).json(&body)).await
+    }
+
+    async fn snapshot_project(
+        &self,
+        project_id: Uuid,
+        name: &str,
+    ) -> Result<Snapshot, Gns3Error> {
+        let http = self.http.clone();
+        let url = self.url(&format!("/v2/projects/{project_id}/snapshots"));
+        let body = serde_json::json!({ "name": name });
+        self.send(move || http.post(&url).json(&body)).await
     }
 }

@@ -1,0 +1,85 @@
+# cargo-deny configuration
+# Run: cargo deny check
+# CI: cargo deny check --hide-inclusion-graph
+
+[graph]
+# Only check the default feature set
+all-features = false
+
+# ---------------------------------------------------------------------------
+# Security advisories (RustSec)
+# ---------------------------------------------------------------------------
+[advisories]
+# Fetch the RustSec advisory database on every check
+db-fetch = true
+db-path = "~/.cargo/advisory-db"
+db-urls = ["https://github.com/rustsec/advisory-db"]
+
+# Deny all known vulnerabilities
+vulnerability = "deny"
+# Warn on unmaintained crates (promote to deny when stable)
+unmaintained = "warn"
+# Warn on crates with security notices
+notice = "warn"
+# Deny yanked crate versions
+yanked = "deny"
+
+# ---------------------------------------------------------------------------
+# Licenses
+# ---------------------------------------------------------------------------
+[licenses]
+# Minimum confidence threshold for license detection
+confidence-threshold = 0.8
+
+# Allowed licenses — all permissive, compatible with MIT
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-DFS-2016",
+    "CC0-1.0",
+    "OpenSSL",          # only if OpenSSL-licensed deps sneak in transitively
+]
+
+# Deny copyleft licenses that would affect distribution
+deny = [
+    "GPL-2.0",
+    "GPL-3.0",
+    "LGPL-2.0",
+    "LGPL-2.1",
+    "LGPL-3.0",
+    "AGPL-3.0",
+]
+
+# Handle crates with multiple licenses
+exceptions = []
+
+# ---------------------------------------------------------------------------
+# Banned crates
+# ---------------------------------------------------------------------------
+[bans]
+# Deny duplicate versions of the same crate (encourages deduplication)
+multiple-versions = "warn"
+# Deny crates that are wildcards in Cargo.toml (version = "*")
+wildcards = "deny"
+
+# Explicitly deny crates we never want
+deny = [
+    # OpenSSL — we use rustls; if this appears, something pulled it transitively
+    { name = "openssl" },
+    { name = "openssl-sys" },
+]
+
+# ---------------------------------------------------------------------------
+# Sources
+# ---------------------------------------------------------------------------
+[sources]
+# Only allow crates from crates.io and our own local path dependencies
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+# Our local workspace crates are always allowed
+allow-git = []

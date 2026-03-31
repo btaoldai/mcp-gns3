@@ -5,6 +5,7 @@
 //! lives in [`crate::server::Gns3Server`].
 
 pub mod computes;
+pub mod drawings;
 pub mod links;
 pub mod nodes;
 pub mod projects;
@@ -19,7 +20,8 @@ use rmcp::model::{ErrorCode, ErrorData};
 #[allow(clippy::needless_pass_by_value)] // Required for `.map_err(to_mcp_error)` ergonomics
 pub fn to_mcp_error(err: Gns3Error) -> ErrorData {
     let code = match &err {
-        Gns3Error::InvalidUuid { .. } | Gns3Error::Config(_) => ErrorCode::INVALID_PARAMS,
+        Gns3Error::InvalidUuid(_) | Gns3Error::Config(_) => ErrorCode::INVALID_PARAMS,
+        Gns3Error::CircuitOpen => ErrorCode::INTERNAL_ERROR,
         _ => ErrorCode::INTERNAL_ERROR,
     };
     ErrorData {
@@ -55,6 +57,8 @@ pub mod mock {
     pub const NODE2_ID: &str = "66666666-7777-8888-9999-aaaaaaaaaaaa";
     pub const TEMPLATE_ID: &str = "cccccccc-dddd-eeee-ffff-000000000000";
     pub const LINK_ID: &str = "bbbbbbbb-cccc-dddd-eeee-ffffffffffff";
+    pub const DRAWING_ID: &str = "dddddddd-eeee-ffff-0000-111111111111";
+    pub const SNAPSHOT_ID: &str = "eeeeeeee-ffff-0000-1111-222222222222";
 
     fn pid() -> Uuid {
         PROJECT_ID.parse().unwrap()
@@ -70,6 +74,14 @@ pub mod mock {
     }
     fn lid() -> Uuid {
         LINK_ID.parse().unwrap()
+    }
+
+    fn did() -> Uuid {
+        DRAWING_ID.parse().unwrap()
+    }
+
+    fn sid() -> Uuid {
+        SNAPSHOT_ID.parse().unwrap()
     }
 
     fn sample_project() -> Project {
@@ -232,31 +244,98 @@ pub mod mock {
                 sample_node(nid2(), "PC2", NodeStatus::Stopped),
             ])
         }
+
+        async fn update_node(
+            &self,
+            _project_id: Uuid,
+            _node_id: Uuid,
+            update: gns3_mcp_core::UpdateNodeRequest,
+        ) -> Result<Node, Gns3Error> {
+            Ok(sample_node(
+                nid1(),
+                update.name.as_deref().unwrap_or("PC1"),
+                NodeStatus::Stopped,
+            ))
+        }
+
+        async fn update_template(
+            &self,
+            _template_id: Uuid,
+            properties: serde_json::Value,
+        ) -> Result<serde_json::Value, Gns3Error> {
+            Ok(properties)
+        }
+
+        async fn add_drawing(
+            &self,
+            _project_id: Uuid,
+            request: gns3_mcp_core::AddDrawingRequest,
+        ) -> Result<gns3_mcp_core::Drawing, Gns3Error> {
+            Ok(gns3_mcp_core::Drawing {
+                drawing_id: did(),
+                project_id: pid(),
+                svg: request.svg,
+                x: request.x,
+                y: request.y,
+                z: request.z.unwrap_or(0),
+            })
+        }
+
+        async fn export_project(
+            &self,
+            _project_id: Uuid,
+            _include_images: bool,
+        ) -> Result<gns3_mcp_core::ExportResult, Gns3Error> {
+            Ok(gns3_mcp_core::ExportResult {
+                size_bytes: 1024 * 512, // 512 KB
+            })
+        }
+
+        async fn configure_switch(
+            &self,
+            _project_id: Uuid,
+            _node_id: Uuid,
+            _ports: Vec<gns3_mcp_core::SwitchPort>,
+        ) -> Result<Node, Gns3Error> {
+            Ok(sample_node(nid1(), "EthernetSwitch1", NodeStatus::Stopped))
+        }
+
+        async fn snapshot_project(
+            &self,
+            _project_id: Uuid,
+            name: &str,
+        ) -> Result<gns3_mcp_core::Snapshot, Gns3Error> {
+            Ok(gns3_mcp_core::Snapshot {
+                snapshot_id: sid(),
+                name: name.to_string(),
+                created_at: "2026-03-31T12:00:00Z".to_string(),
+            })
+        }
     }
 
-    /// A mock that returns a [`Gns3Error::Http`] for every operation.
+    /// A mock that returns a [`Gns3Error::Network`] for every operation.
     pub struct MockGns3ApiError;
 
     #[async_trait::async_trait]
     impl Gns3Api for MockGns3ApiError {
         async fn get_version(&self) -> Result<Version, Gns3Error> {
-            Err(Gns3Error::Http("connection refused".to_string()))
+            Err(Gns3Error::Network("connection refused".to_string()))
         }
 
         async fn list_projects(&self) -> Result<Vec<Project>, Gns3Error> {
-            Err(Gns3Error::Http("connection refused".to_string()))
+            Err(Gns3Error::Network("connection refused".to_string()))
         }
 
         async fn create_project(&self, _name: &str) -> Result<Project, Gns3Error> {
-            Err(Gns3Error::Http("connection refused".to_string()))
+            Err(Gns3Error::Network("connection refused".to_string()))
         }
 
         async fn open_project(&self, _project_id: Uuid) -> Result<Project, Gns3Error> {
-            Err(Gns3Error::Http("connection refused".to_string()))
+            Err(Gns3Error::Network("connection refused".to_string()))
         }
 
         async fn list_templates(&self) -> Result<Vec<Template>, Gns3Error> {
-            Err(Gns3Error::Http("connection refused".to_string()))
+            Err(Gns3Error::Network("connection refused".to_string()))
         }
 
         async fn create_node(
@@ -265,11 +344,11 @@ pub mod mock {
             _template_id: Uuid,
             _request: CreateNodeRequest,
         ) -> Result<Node, Gns3Error> {
-            Err(Gns3Error::Http("connection refused".to_string()))
+            Err(Gns3Error::Network("connection refused".to_string()))
         }
 
         async fn start_node(&self, _project_id: Uuid, _node_id: Uuid) -> Result<Node, Gns3Error> {
-            Err(Gns3Error::Http("connection refused".to_string()))
+            Err(Gns3Error::Network("connection refused".to_string()))
         }
 
         async fn create_link(
@@ -277,47 +356,97 @@ pub mod mock {
             _project_id: Uuid,
             _endpoints: Vec<LinkEndpoint>,
         ) -> Result<Link, Gns3Error> {
-            Err(Gns3Error::Http("connection refused".to_string()))
+            Err(Gns3Error::Network("connection refused".to_string()))
         }
 
         async fn list_nodes(&self, _project_id: Uuid) -> Result<Vec<Node>, Gns3Error> {
-            Err(Gns3Error::Http("connection refused".to_string()))
+            Err(Gns3Error::Network("connection refused".to_string()))
         }
 
         async fn stop_node(&self, _project_id: Uuid, _node_id: Uuid) -> Result<Node, Gns3Error> {
-            Err(Gns3Error::Http("connection refused".to_string()))
+            Err(Gns3Error::Network("connection refused".to_string()))
         }
 
         async fn delete_node(&self, _project_id: Uuid, _node_id: Uuid) -> Result<(), Gns3Error> {
-            Err(Gns3Error::Http("connection refused".to_string()))
+            Err(Gns3Error::Network("connection refused".to_string()))
         }
 
         async fn list_links(&self, _project_id: Uuid) -> Result<Vec<Link>, Gns3Error> {
-            Err(Gns3Error::Http("connection refused".to_string()))
+            Err(Gns3Error::Network("connection refused".to_string()))
         }
 
         async fn delete_link(&self, _project_id: Uuid, _link_id: Uuid) -> Result<(), Gns3Error> {
-            Err(Gns3Error::Http("connection refused".to_string()))
+            Err(Gns3Error::Network("connection refused".to_string()))
         }
 
         async fn close_project(&self, _project_id: Uuid) -> Result<Project, Gns3Error> {
-            Err(Gns3Error::Http("connection refused".to_string()))
+            Err(Gns3Error::Network("connection refused".to_string()))
         }
 
         async fn delete_project(&self, _project_id: Uuid) -> Result<(), Gns3Error> {
-            Err(Gns3Error::Http("connection refused".to_string()))
+            Err(Gns3Error::Network("connection refused".to_string()))
         }
 
         async fn list_computes(&self) -> Result<Vec<Compute>, Gns3Error> {
-            Err(Gns3Error::Http("connection refused".to_string()))
+            Err(Gns3Error::Network("connection refused".to_string()))
         }
 
         async fn start_all_nodes(&self, _project_id: Uuid) -> Result<Vec<Node>, Gns3Error> {
-            Err(Gns3Error::Http("connection refused".to_string()))
+            Err(Gns3Error::Network("connection refused".to_string()))
         }
 
         async fn stop_all_nodes(&self, _project_id: Uuid) -> Result<Vec<Node>, Gns3Error> {
-            Err(Gns3Error::Http("connection refused".to_string()))
+            Err(Gns3Error::Network("connection refused".to_string()))
+        }
+
+        async fn update_node(
+            &self,
+            _project_id: Uuid,
+            _node_id: Uuid,
+            _update: gns3_mcp_core::UpdateNodeRequest,
+        ) -> Result<Node, Gns3Error> {
+            Err(Gns3Error::Network("connection refused".to_string()))
+        }
+
+        async fn update_template(
+            &self,
+            _template_id: Uuid,
+            _properties: serde_json::Value,
+        ) -> Result<serde_json::Value, Gns3Error> {
+            Err(Gns3Error::Network("connection refused".to_string()))
+        }
+
+        async fn add_drawing(
+            &self,
+            _project_id: Uuid,
+            _request: gns3_mcp_core::AddDrawingRequest,
+        ) -> Result<gns3_mcp_core::Drawing, Gns3Error> {
+            Err(Gns3Error::Network("connection refused".to_string()))
+        }
+
+        async fn export_project(
+            &self,
+            _project_id: Uuid,
+            _include_images: bool,
+        ) -> Result<gns3_mcp_core::ExportResult, Gns3Error> {
+            Err(Gns3Error::Network("connection refused".to_string()))
+        }
+
+        async fn configure_switch(
+            &self,
+            _project_id: Uuid,
+            _node_id: Uuid,
+            _ports: Vec<gns3_mcp_core::SwitchPort>,
+        ) -> Result<Node, Gns3Error> {
+            Err(Gns3Error::Network("connection refused".to_string()))
+        }
+
+        async fn snapshot_project(
+            &self,
+            _project_id: Uuid,
+            _name: &str,
+        ) -> Result<gns3_mcp_core::Snapshot, Gns3Error> {
+            Err(Gns3Error::Network("connection refused".to_string()))
         }
     }
 
@@ -360,10 +489,7 @@ mod tests {
     #[test]
     fn to_mcp_error_maps_codes() {
         // InvalidUuid -> INVALID_PARAMS
-        let err_uuid = Gns3Error::InvalidUuid {
-            value: "bad".to_string(),
-            reason: "not a uuid".to_string(),
-        };
+        let err_uuid = Gns3Error::InvalidUuid("bad".to_string());
         let mcp_uuid = to_mcp_error(err_uuid);
         assert_eq!(mcp_uuid.code, ErrorCode::INVALID_PARAMS);
 
@@ -372,17 +498,17 @@ mod tests {
         let mcp_cfg = to_mcp_error(err_cfg);
         assert_eq!(mcp_cfg.code, ErrorCode::INVALID_PARAMS);
 
-        // Http -> INTERNAL_ERROR
-        let err_http = Gns3Error::Http("timeout".to_string());
-        let mcp_http = to_mcp_error(err_http);
-        assert_eq!(mcp_http.code, ErrorCode::INTERNAL_ERROR);
+        // Network -> INTERNAL_ERROR
+        let err_net = Gns3Error::Network("timeout".to_string());
+        let mcp_net = to_mcp_error(err_net);
+        assert_eq!(mcp_net.code, ErrorCode::INTERNAL_ERROR);
 
-        // Api -> INTERNAL_ERROR
-        let err_api = Gns3Error::Api {
+        // Http -> INTERNAL_ERROR
+        let err_http = Gns3Error::Http {
             status: 404,
             message: "not found".to_string(),
         };
-        let mcp_api = to_mcp_error(err_api);
-        assert_eq!(mcp_api.code, ErrorCode::INTERNAL_ERROR);
+        let mcp_http = to_mcp_error(err_http);
+        assert_eq!(mcp_http.code, ErrorCode::INTERNAL_ERROR);
     }
 }

@@ -150,6 +150,86 @@ pub struct CreateNodeRequest {
     pub compute_id: Option<String>,
 }
 
+/// Request payload for updating an existing node.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UpdateNodeRequest {
+    /// Optional new node name.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// Optional compute node ID to move the node to.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub compute_id: Option<String>,
+    /// Optional properties object for type-specific settings (e.g. QEMU adapters).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub properties: Option<serde_json::Value>,
+}
+
+/// A drawing (label, shape, or SVG) on the project canvas.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Drawing {
+    /// Unique drawing identifier.
+    pub drawing_id: Uuid,
+    /// Parent project identifier.
+    pub project_id: Uuid,
+    /// SVG content or shape definition.
+    pub svg: String,
+    /// X coordinate on the canvas.
+    pub x: i32,
+    /// Y coordinate on the canvas.
+    pub y: i32,
+    /// Z-order (stacking depth).
+    pub z: i32,
+}
+
+/// Request payload for adding a drawing to a project canvas.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AddDrawingRequest {
+    /// SVG content or shape definition.
+    pub svg: String,
+    /// X coordinate on the canvas.
+    pub x: i32,
+    /// Y coordinate on the canvas.
+    pub y: i32,
+    /// Optional Z-order (defaults to 0 if omitted).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub z: Option<i32>,
+}
+
+/// Port configuration for Ethernet switches.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct SwitchPort {
+    /// Port name (e.g. "Ethernet0").
+    pub name: String,
+    /// Port number.
+    pub port_number: u32,
+    /// Port type (e.g. "access", "trunk").
+    #[serde(rename = "type")]
+    pub type_: String,
+    /// VLAN ID.
+    pub vlan: u32,
+    /// Optional EtherType for filtering.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ethertype: Option<String>,
+}
+
+/// Result of exporting a project.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExportResult {
+    /// Size of the exported archive in bytes.
+    pub size_bytes: usize,
+}
+
+/// A project snapshot for versioning and rollback.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Snapshot {
+    /// Unique snapshot identifier.
+    pub snapshot_id: Uuid,
+    /// Snapshot name.
+    pub name: String,
+    /// Creation timestamp as ISO 8601 string.
+    pub created_at: String,
+}
+
 impl std::fmt::Display for ProjectStatus {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {

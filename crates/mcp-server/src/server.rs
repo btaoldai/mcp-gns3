@@ -218,6 +218,62 @@ impl Gns3Server {
     ) -> Result<CallToolResult, ErrorData> {
         tools::nodes::stop_all_nodes(&*self.api, params).await
     }
+
+    // ── P3: Advanced tools ────────────────────────────────────
+
+    /// Update an existing node (name, compute_id, properties).
+    #[tool(description = "Update an existing node (name, compute node, or properties)")]
+    async fn gns3_update_node(
+        &self,
+        Parameters(params): Parameters<tools::nodes::UpdateNodeParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        tools::nodes::update_node(&*self.api, params).await
+    }
+
+    /// Update a template's properties.
+    #[tool(description = "Update a template (RAM, network interfaces, boot order, etc.)")]
+    async fn gns3_update_template(
+        &self,
+        Parameters(params): Parameters<tools::templates::UpdateTemplateParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        tools::templates::update_template(&*self.api, params).await
+    }
+
+    /// Add a drawing to the project canvas.
+    #[tool(description = "Add a drawing, label, or shape to the GNS3 project canvas")]
+    async fn gns3_add_drawing(
+        &self,
+        Parameters(params): Parameters<tools::drawings::AddDrawingParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        tools::drawings::add_drawing(&*self.api, params).await
+    }
+
+    /// Export a project as a .gns3project archive.
+    #[tool(description = "Export a GNS3 project to a .gns3project archive file")]
+    async fn gns3_export_project(
+        &self,
+        Parameters(params): Parameters<tools::projects::ExportProjectParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        tools::projects::export_project(&*self.api, params).await
+    }
+
+    /// Configure VLAN ports on an Ethernet switch.
+    #[tool(description = "Configure VLAN port mappings on an Ethernet switch node")]
+    async fn gns3_configure_switch(
+        &self,
+        Parameters(params): Parameters<tools::nodes::ConfigureSwitchParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        tools::nodes::configure_switch(&*self.api, params).await
+    }
+
+    /// Create a snapshot of the project.
+    #[tool(description = "Create a snapshot of the project's current state for backup/versioning")]
+    async fn gns3_snapshot_project(
+        &self,
+        Parameters(params): Parameters<tools::projects::SnapshotProjectParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        tools::projects::snapshot_project(&*self.api, params).await
+    }
 }
 
 #[tool_handler]

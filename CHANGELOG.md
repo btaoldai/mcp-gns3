@@ -5,6 +5,49 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.0] - 2026-03-31
+
+### Security
+
+* Added `SECURITY.md` with vulnerability reporting policy, network exposure
+  guidance, and container hardening notes
+* Added explicit warning for `--network host` Docker usage with safer
+  `--add-host` alternative documented in README and SECURITY.md
+* Added `cargo-deny` (`deny.toml`) to CI: blocks crates with known CVEs,
+  GPL-licensed dependencies, and OpenSSL transitive pulls
+* Blocked `openssl` and `openssl-sys` in `deny.toml` — enforces rustls-only
+  TLS across the dependency tree
+
+### Added
+
+* `crates/core/src/circuit_breaker.rs`: async three-state circuit breaker
+  (`Closed → Open → Half-Open`) with configurable failure threshold and
+  recovery timeout
+* `CircuitBreakerError::Open` variant allows `mcp-server` to return an
+  actionable message to the LLM when GNS3 is temporarily unavailable
+* `Gns3Error::CircuitOpen` variant in `crates/core/src/error.rs`
+* `CONTRIBUTING.md`: development workflow, branch strategy, commit convention,
+  code standards checklist, and tool-addition guide
+* `docs/adr/0005-circuit-breaker.md`: rationale for circuit breaker placement
+  in `core`
+* `docs/adr/0006-non-exhaustive-errors.md`: rationale for `#[non_exhaustive]`
+  on public error enums
+* CI workflow: added `cargo-deny` job (security + license audit) and Docker
+  build smoke test
+
+### Changed
+
+* All public error enums in `crates/core/src/error.rs` are now
+  `#[non_exhaustive]` — adding variants in future minor releases is no longer
+  a breaking change
+* Error enum variants restructured: `Http { status, message }`,
+  `Network(String)`, `InvalidUuid(String)`, `Server(String)` — improves
+  semantic clarity for different error categories
+
+### Fixed
+
+* (None — this is a non-breaking feature release)
+
 ## [0.1.0] - 2026-03-30
 
 Initial release -- 19 MCP tools, Docker image, CI/CD.

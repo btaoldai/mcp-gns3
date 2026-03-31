@@ -7,7 +7,8 @@ use uuid::Uuid;
 
 use crate::error::Gns3Error;
 use crate::types::{
-    Compute, CreateNodeRequest, Link, LinkEndpoint, Node, Project, Template, Version,
+    AddDrawingRequest, Compute, CreateNodeRequest, Drawing, ExportResult, Link, LinkEndpoint,
+    Node, Project, Snapshot, SwitchPort, Template, UpdateNodeRequest, Version,
 };
 
 /// Async interface for GNS3 REST API v2 operations.
@@ -120,4 +121,69 @@ pub trait Gns3Api: Send + Sync {
     /// Maps to `POST /v2/projects/{project_id}/nodes/stop`.
     /// Returns the list of nodes with their updated status.
     async fn stop_all_nodes(&self, project_id: Uuid) -> Result<Vec<Node>, Gns3Error>;
+
+    // ── P3: Advanced node operations ──────────────────────────
+
+    /// Update an existing node (name, compute_id, properties).
+    ///
+    /// Maps to `PUT /v2/projects/{project_id}/nodes/{node_id}`.
+    async fn update_node(
+        &self,
+        project_id: Uuid,
+        node_id: Uuid,
+        update: UpdateNodeRequest,
+    ) -> Result<Node, Gns3Error>;
+
+    // ── P3: Template operations ──────────────────────────────
+
+    /// Update a template's properties (RAM, NICs, etc.).
+    ///
+    /// Maps to `PUT /v2/templates/{template_id}`.
+    async fn update_template(
+        &self,
+        template_id: Uuid,
+        properties: serde_json::Value,
+    ) -> Result<serde_json::Value, Gns3Error>;
+
+    // ── P3: Drawing operations ───────────────────────────────
+
+    /// Add a drawing (label, rectangle, SVG) to the project canvas.
+    ///
+    /// Maps to `POST /v2/projects/{project_id}/drawings`.
+    async fn add_drawing(
+        &self,
+        project_id: Uuid,
+        request: AddDrawingRequest,
+    ) -> Result<Drawing, Gns3Error>;
+
+    // ── P3: Export operations ────────────────────────────────
+
+    /// Export a project as a .gns3project archive.
+    ///
+    /// Maps to `GET /v2/projects/{project_id}/export`.
+    /// Returns the byte count of the exported archive.
+    async fn export_project(
+        &self,
+        project_id: Uuid,
+        include_images: bool,
+    ) -> Result<ExportResult, Gns3Error>;
+
+    // ── P3: Switch configuration ─────────────────────────────
+
+    /// Configure VLAN ports on an Ethernet switch node.
+    ///
+    /// Maps to `PUT /v2/projects/{project_id}/nodes/{node_id}` with ports_mapping.
+    async fn configure_switch(
+        &self,
+        project_id: Uuid,
+        node_id: Uuid,
+        ports: Vec<SwitchPort>,
+    ) -> Result<Node, Gns3Error>;
+
+    // ── P3: Snapshot operations ──────────────────────────────
+
+    /// Create a snapshot of the project's current state.
+    ///
+    /// Maps to `POST /v2/projects/{project_id}/snapshots`.
+    async fn snapshot_project(&self, project_id: Uuid, name: &str) -> Result<Snapshot, Gns3Error>;
 }

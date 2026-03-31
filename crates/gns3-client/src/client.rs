@@ -9,6 +9,7 @@ use uuid::Uuid;
 use gns3_mcp_core::{
     AddDrawingRequest, Compute, CreateNodeRequest, Drawing, ExportResult, Gns3Error, Link,
     LinkEndpoint, Node, Project, Snapshot, SwitchPort, Template, UpdateNodeRequest, Version,
+    circuit_breaker::{CircuitBreaker, CircuitBreakerConfig, CircuitBreakerError},
 };
 
 use crate::config::Gns3ClientConfig;
@@ -24,15 +25,22 @@ const BACKOFF_BASE_MS: u64 = 100;
 /// Created via [`Gns3Client::new`] with a [`Gns3ClientConfig`].
 /// Implements [`gns3_mcp_core::Gns3Api`] so it can be injected
 /// into the MCP server as `Arc<dyn Gns3Api>`.
+///
+/// All outbound API calls are protected by a [`CircuitBreaker`] to prevent
+/// cascading failures when the GNS3 server becomes unavailable.
 pub struct Gns3Client {
     http: Client,
     base_url: String,
     username: Option<String>,
     password: Option<String>,
+    circuit_breaker: CircuitBreaker,
 }
 
 impl Gns3Client {
     /// Create a new client from the given configuration.
+    ///
+    /// The circuit breaker is initialized with default configuration:
+    /// failure threshold of 5 consecutive failures and a 30-second recovery timeout.
     ///
     /// # Errors
     ///
@@ -48,6 +56,30 @@ impl Gns3Client {
             base_url: config.base_url,
             username: config.username,
             password: config.password,
+            circuit_breaker: CircuitBreaker::with_defaults(),
+        })
+    }
+
+    /// Create a new client with custom circuit breaker configuration.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Gns3Error::Config`] if the HTTP client cannot be built.
+    pub fn with_circuit_breaker(
+        config: Gns3ClientConfig,
+        cb_config: CircuitBreakerConfig,
+    ) -> Result<Self, Gns3Error> {
+        let http = Client::builder()
+            .timeout(Duration::from_secs(config.timeout_secs))
+            .build()
+            .map_err(|e| Gns3Error::Config(format!("failed to build HTTP client: {e}")))?;
+
+        Ok(Self {
+            http,
+            base_url: config.base_url,
+            username: config.username,
+            password: config.password,
+            circuit_breaker: CircuitBreaker::new(cb_config),
         })
     }
 
@@ -71,57 +103,74 @@ impl Gns3Client {
     /// exponential backoff (100ms, 200ms, 400ms). Network errors and 4xx
     /// client errors are returned immediately without retrying.
     ///
+    /// The entire retry loop is wrapped by the circuit breaker. Only transient
+    /// failures (5xx after retries exhausted) and network errors count toward
+    /// circuit breaker failure thresholds. 4xx client errors do not.
+    ///
     /// The `make_req` closure is called once per attempt so that the
     /// [`RequestBuilder`] (which is consumed on send) can be reconstructed.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Gns3Error::CircuitOpen`] if the circuit breaker is open.
     async fn send<T, F>(&self, make_req: F) -> Result<T, Gns3Error>
     where
         T: DeserializeOwned,
-        F: Fn() -> RequestBuilder,
+        F: Fn() -> RequestBuilder + 'static,
     {
-        let mut attempt = 0u32;
-        loop {
-            let req = self.auth(make_req());
-            let response = req
-                .send()
-                .await
-                .map_err(|e| Gns3Error::Network(e.to_string()))?;
+        self.circuit_breaker
+            .call(|| async {
+                let mut attempt = 0u32;
+                loop {
+                    let req = self.auth(make_req());
+                    let response = req
+                        .send()
+                        .await
+                        .map_err(|e| Gns3Error::Network(e.to_string()))?;
 
-            let status = response.status();
+                    let status = response.status();
 
-            if status.is_server_error() && attempt < MAX_RETRIES {
-                let message = response
-                    .text()
-                    .await
-                    .unwrap_or_else(|_| "no response body".to_string());
-                let delay_ms = BACKOFF_BASE_MS * (1u64 << attempt);
-                tracing::warn!(
-                    attempt = attempt + 1,
-                    max_retries = MAX_RETRIES,
-                    status = status.as_u16(),
-                    delay_ms,
-                    "GNS3 server error — retrying after {delay_ms}ms: {message}"
-                );
-                tokio::time::sleep(Duration::from_millis(delay_ms)).await;
-                attempt += 1;
-                continue;
-            }
+                    if status.is_server_error() && attempt < MAX_RETRIES {
+                        let message = response
+                            .text()
+                            .await
+                            .unwrap_or_else(|_| "no response body".to_string());
+                        let delay_ms = BACKOFF_BASE_MS * (1u64 << attempt);
+                        tracing::warn!(
+                            attempt = attempt + 1,
+                            max_retries = MAX_RETRIES,
+                            status = status.as_u16(),
+                            delay_ms,
+                            "GNS3 server error — retrying after {delay_ms}ms: {message}"
+                        );
+                        tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+                        attempt += 1;
+                        continue;
+                    }
 
-            if !status.is_success() {
-                let message = response
-                    .text()
-                    .await
-                    .unwrap_or_else(|_| "no response body".to_string());
-                return Err(Gns3Error::Http {
-                    status: status.as_u16(),
-                    message,
-                });
-            }
+                    if !status.is_success() {
+                        let message = response
+                            .text()
+                            .await
+                            .unwrap_or_else(|_| "no response body".to_string());
+                        return Err(Gns3Error::Http {
+                            status: status.as_u16(),
+                            message,
+                        });
+                    }
 
-            return response
-                .json::<T>()
-                .await
-                .map_err(|e| Gns3Error::Deserialize(e.to_string()));
-        }
+                    return response
+                        .json::<T>()
+                        .await
+                        .map_err(|e| Gns3Error::Deserialize(e.to_string()));
+                }
+            })
+            .await
+            .map_err(|e| match e {
+                CircuitBreakerError::Inner(err) => err,
+                CircuitBreakerError::Open => Gns3Error::CircuitOpen,
+                _ => Gns3Error::Server("unexpected circuit breaker state".into()),
+            })
     }
 
     /// Send a POST and deserialize the response.
@@ -130,66 +179,80 @@ impl Gns3Client {
     /// GET on `get_fallback_url` to retrieve the current resource state.
     ///
     /// Retries the POST up to [`MAX_RETRIES`] times on 5xx errors with
-    /// exponential backoff. The GET fallback does not retry independently —
-    /// it delegates to [`Gns3Client::send`] which handles its own retries.
+    /// exponential backoff. The entire retry loop is wrapped by the circuit breaker.
+    /// The GET fallback delegates to [`Gns3Client::send`] which applies circuit
+    /// breaker protection independently.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Gns3Error::CircuitOpen`] if the circuit breaker is open.
     async fn post_with_get_fallback<T: DeserializeOwned>(
         &self,
         post_url: &str,
         get_fallback_url: &str,
     ) -> Result<T, Gns3Error> {
-        let mut attempt = 0u32;
-        loop {
-            let req = self.auth(self.http.post(post_url));
-            let response = req
-                .send()
-                .await
-                .map_err(|e| Gns3Error::Network(e.to_string()))?;
+        self.circuit_breaker
+            .call(|| async {
+                let mut attempt = 0u32;
+                loop {
+                    let req = self.auth(self.http.post(post_url));
+                    let response = req
+                        .send()
+                        .await
+                        .map_err(|e| Gns3Error::Network(e.to_string()))?;
 
-            let status = response.status();
+                    let status = response.status();
 
-            if status.is_server_error() && attempt < MAX_RETRIES {
-                let message = response
-                    .text()
-                    .await
-                    .unwrap_or_else(|_| "no response body".to_string());
-                let delay_ms = BACKOFF_BASE_MS * (1u64 << attempt);
-                tracing::warn!(
-                    attempt = attempt + 1,
-                    max_retries = MAX_RETRIES,
-                    status = status.as_u16(),
-                    delay_ms,
-                    "GNS3 server error — retrying after {delay_ms}ms: {message}"
-                );
-                tokio::time::sleep(Duration::from_millis(delay_ms)).await;
-                attempt += 1;
-                continue;
-            }
+                    if status.is_server_error() && attempt < MAX_RETRIES {
+                        let message = response
+                            .text()
+                            .await
+                            .unwrap_or_else(|_| "no response body".to_string());
+                        let delay_ms = BACKOFF_BASE_MS * (1u64 << attempt);
+                        tracing::warn!(
+                            attempt = attempt + 1,
+                            max_retries = MAX_RETRIES,
+                            status = status.as_u16(),
+                            delay_ms,
+                            "GNS3 server error — retrying after {delay_ms}ms: {message}"
+                        );
+                        tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+                        attempt += 1;
+                        continue;
+                    }
 
-            if !status.is_success() {
-                let message = response
-                    .text()
-                    .await
-                    .unwrap_or_else(|_| "no response body".to_string());
-                return Err(Gns3Error::Http {
-                    status: status.as_u16(),
-                    message,
-                });
-            }
+                    if !status.is_success() {
+                        let message = response
+                            .text()
+                            .await
+                            .unwrap_or_else(|_| "no response body".to_string());
+                        return Err(Gns3Error::Http {
+                            status: status.as_u16(),
+                            message,
+                        });
+                    }
 
-            let body = response
-                .text()
-                .await
-                .map_err(|e| Gns3Error::Network(e.to_string()))?;
+                    let body = response
+                        .text()
+                        .await
+                        .map_err(|e| Gns3Error::Network(e.to_string()))?;
 
-            if body.is_empty() {
-                let http = self.http.clone();
-                let fallback_url = get_fallback_url.to_string();
-                return self.send(move || http.get(&fallback_url)).await;
-            }
+                    if body.is_empty() {
+                        let http = self.http.clone();
+                        let fallback_url = get_fallback_url.to_string();
+                        return self.send(move || http.get(&fallback_url)).await;
+                    }
 
-            return serde_json::from_str::<T>(&body)
-                .map_err(|e| Gns3Error::Deserialize(e.to_string()));
-        }
+                    return serde_json::from_str::<T>(&body)
+                        .map_err(|e| Gns3Error::Deserialize(e.to_string()));
+                }
+            })
+            .await
+            .map_err(|e| match e {
+                CircuitBreakerError::Inner(err) => err,
+                CircuitBreakerError::Open => Gns3Error::CircuitOpen,
+                _ => Gns3Error::Server("unexpected circuit breaker state".into()),
+            })
     }
 
     /// POST to `post_url` (no body expected), then GET `get_list_url` to
@@ -197,103 +260,134 @@ impl Gns3Client {
     ///
     /// Used for bulk operations like start/stop all nodes that return
     /// 204 No Content and require a follow-up GET to observe the result.
+    ///
+    /// The entire operation is wrapped by the circuit breaker. The GET fallback
+    /// delegates to [`Gns3Client::send`] which applies circuit breaker protection
+    /// independently.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Gns3Error::CircuitOpen`] if the circuit breaker is open.
     async fn post_then_get_list<T: DeserializeOwned>(
         &self,
         post_url: &str,
         get_list_url: &str,
     ) -> Result<T, Gns3Error> {
-        let mut attempt = 0u32;
-        loop {
-            let req = self.auth(self.http.post(post_url));
-            let response = req
-                .send()
-                .await
-                .map_err(|e| Gns3Error::Network(e.to_string()))?;
+        self.circuit_breaker
+            .call(|| async {
+                let mut attempt = 0u32;
+                loop {
+                    let req = self.auth(self.http.post(post_url));
+                    let response = req
+                        .send()
+                        .await
+                        .map_err(|e| Gns3Error::Network(e.to_string()))?;
 
-            let status = response.status();
+                    let status = response.status();
 
-            if status.is_server_error() && attempt < MAX_RETRIES {
-                let message = response
-                    .text()
-                    .await
-                    .unwrap_or_else(|_| "no response body".to_string());
-                let delay_ms = BACKOFF_BASE_MS * (1u64 << attempt);
-                tracing::warn!(
-                    attempt = attempt + 1,
-                    max_retries = MAX_RETRIES,
-                    status = status.as_u16(),
-                    delay_ms,
-                    "GNS3 server error — retrying after {delay_ms}ms: {message}"
-                );
-                tokio::time::sleep(Duration::from_millis(delay_ms)).await;
-                attempt += 1;
-                continue;
-            }
+                    if status.is_server_error() && attempt < MAX_RETRIES {
+                        let message = response
+                            .text()
+                            .await
+                            .unwrap_or_else(|_| "no response body".to_string());
+                        let delay_ms = BACKOFF_BASE_MS * (1u64 << attempt);
+                        tracing::warn!(
+                            attempt = attempt + 1,
+                            max_retries = MAX_RETRIES,
+                            status = status.as_u16(),
+                            delay_ms,
+                            "GNS3 server error — retrying after {delay_ms}ms: {message}"
+                        );
+                        tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+                        attempt += 1;
+                        continue;
+                    }
 
-            if !status.is_success() {
-                let message = response
-                    .text()
-                    .await
-                    .unwrap_or_else(|_| "no response body".to_string());
-                return Err(Gns3Error::Http {
-                    status: status.as_u16(),
-                    message,
-                });
-            }
+                    if !status.is_success() {
+                        let message = response
+                            .text()
+                            .await
+                            .unwrap_or_else(|_| "no response body".to_string());
+                        return Err(Gns3Error::Http {
+                            status: status.as_u16(),
+                            message,
+                        });
+                    }
 
-            // Discard the body (204 or empty 200) and fetch the list.
-            let http = self.http.clone();
-            let fallback_url = get_list_url.to_string();
-            return self.send(move || http.get(&fallback_url)).await;
-        }
+                    // Discard the body (204 or empty 200) and fetch the list.
+                    let http = self.http.clone();
+                    let fallback_url = get_list_url.to_string();
+                    return self.send(move || http.get(&fallback_url)).await;
+                }
+            })
+            .await
+            .map_err(|e| match e {
+                CircuitBreakerError::Inner(err) => err,
+                CircuitBreakerError::Open => Gns3Error::CircuitOpen,
+                _ => Gns3Error::Server("unexpected circuit breaker state".into()),
+            })
     }
 
     /// Send an authenticated DELETE request and verify success.
     ///
     /// Retries up to [`MAX_RETRIES`] times on 5xx server errors with
-    /// exponential backoff. 4xx errors and network failures are returned
-    /// immediately without retrying.
+    /// exponential backoff. The entire retry loop is wrapped by the circuit breaker.
+    /// 4xx errors do not count toward circuit breaker failure thresholds.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Gns3Error::CircuitOpen`] if the circuit breaker is open.
     async fn delete(&self, url: &str) -> Result<(), Gns3Error> {
-        let mut attempt = 0u32;
-        loop {
-            let req = self.auth(self.http.delete(url));
-            let response = req
-                .send()
-                .await
-                .map_err(|e| Gns3Error::Network(e.to_string()))?;
+        let url_owned = url.to_string();
+        self.circuit_breaker
+            .call(|| async {
+                let mut attempt = 0u32;
+                loop {
+                    let req = self.auth(self.http.delete(&url_owned));
+                    let response = req
+                        .send()
+                        .await
+                        .map_err(|e| Gns3Error::Network(e.to_string()))?;
 
-            let status = response.status();
+                    let status = response.status();
 
-            if status.is_server_error() && attempt < MAX_RETRIES {
-                let message = response
-                    .text()
-                    .await
-                    .unwrap_or_else(|_| "no response body".to_string());
-                let delay_ms = BACKOFF_BASE_MS * (1u64 << attempt);
-                tracing::warn!(
-                    attempt = attempt + 1,
-                    max_retries = MAX_RETRIES,
-                    status = status.as_u16(),
-                    delay_ms,
-                    "GNS3 server error — retrying after {delay_ms}ms: {message}"
-                );
-                tokio::time::sleep(Duration::from_millis(delay_ms)).await;
-                attempt += 1;
-                continue;
-            }
+                    if status.is_server_error() && attempt < MAX_RETRIES {
+                        let message = response
+                            .text()
+                            .await
+                            .unwrap_or_else(|_| "no response body".to_string());
+                        let delay_ms = BACKOFF_BASE_MS * (1u64 << attempt);
+                        tracing::warn!(
+                            attempt = attempt + 1,
+                            max_retries = MAX_RETRIES,
+                            status = status.as_u16(),
+                            delay_ms,
+                            "GNS3 server error — retrying after {delay_ms}ms: {message}"
+                        );
+                        tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+                        attempt += 1;
+                        continue;
+                    }
 
-            if !status.is_success() {
-                let message = response
-                    .text()
-                    .await
-                    .unwrap_or_else(|_| "no response body".to_string());
-                return Err(Gns3Error::Http {
-                    status: status.as_u16(),
-                    message,
-                });
-            }
-            return Ok(());
-        }
+                    if !status.is_success() {
+                        let message = response
+                            .text()
+                            .await
+                            .unwrap_or_else(|_| "no response body".to_string());
+                        return Err(Gns3Error::Http {
+                            status: status.as_u16(),
+                            message,
+                        });
+                    }
+                    return Ok(());
+                }
+            })
+            .await
+            .map_err(|e| match e {
+                CircuitBreakerError::Inner(err) => err,
+                CircuitBreakerError::Open => Gns3Error::CircuitOpen,
+                _ => Gns3Error::Server("unexpected circuit breaker state".into()),
+            })
     }
 }
 
@@ -471,53 +565,62 @@ impl gns3_mcp_core::Gns3Api for Gns3Client {
         let url = self.url(&format!(
             "/v2/projects/{project_id}/export?include_images={query_param}"
         ));
-        let mut attempt = 0u32;
-        loop {
-            let req = self.auth(http.get(&url));
-            let response = req
-                .send()
-                .await
-                .map_err(|e| Gns3Error::Network(e.to_string()))?;
+        self.circuit_breaker
+            .call(|| async {
+                let mut attempt = 0u32;
+                loop {
+                    let req = self.auth(http.get(&url));
+                    let response = req
+                        .send()
+                        .await
+                        .map_err(|e| Gns3Error::Network(e.to_string()))?;
 
-            let status = response.status();
+                    let status = response.status();
 
-            if status.is_server_error() && attempt < MAX_RETRIES {
-                let message = response
-                    .text()
-                    .await
-                    .unwrap_or_else(|_| "no response body".to_string());
-                let delay_ms = BACKOFF_BASE_MS * (1u64 << attempt);
-                tracing::warn!(
-                    attempt = attempt + 1,
-                    max_retries = MAX_RETRIES,
-                    status = status.as_u16(),
-                    delay_ms,
-                    "GNS3 server error — retrying after {delay_ms}ms: {message}"
-                );
-                tokio::time::sleep(Duration::from_millis(delay_ms)).await;
-                attempt += 1;
-                continue;
-            }
+                    if status.is_server_error() && attempt < MAX_RETRIES {
+                        let message = response
+                            .text()
+                            .await
+                            .unwrap_or_else(|_| "no response body".to_string());
+                        let delay_ms = BACKOFF_BASE_MS * (1u64 << attempt);
+                        tracing::warn!(
+                            attempt = attempt + 1,
+                            max_retries = MAX_RETRIES,
+                            status = status.as_u16(),
+                            delay_ms,
+                            "GNS3 server error — retrying after {delay_ms}ms: {message}"
+                        );
+                        tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+                        attempt += 1;
+                        continue;
+                    }
 
-            if !status.is_success() {
-                let message = response
-                    .text()
-                    .await
-                    .unwrap_or_else(|_| "no response body".to_string());
-                return Err(Gns3Error::Http {
-                    status: status.as_u16(),
-                    message,
-                });
-            }
+                    if !status.is_success() {
+                        let message = response
+                            .text()
+                            .await
+                            .unwrap_or_else(|_| "no response body".to_string());
+                        return Err(Gns3Error::Http {
+                            status: status.as_u16(),
+                            message,
+                        });
+                    }
 
-            let bytes = response
-                .bytes()
-                .await
-                .map_err(|e| Gns3Error::Network(e.to_string()))?;
-            return Ok(ExportResult {
-                size_bytes: bytes.len(),
-            });
-        }
+                    let bytes = response
+                        .bytes()
+                        .await
+                        .map_err(|e| Gns3Error::Network(e.to_string()))?;
+                    return Ok(ExportResult {
+                        size_bytes: bytes.len(),
+                    });
+                }
+            })
+            .await
+            .map_err(|e| match e {
+                CircuitBreakerError::Inner(err) => err,
+                CircuitBreakerError::Open => Gns3Error::CircuitOpen,
+                _ => Gns3Error::Server("unexpected circuit breaker state".into()),
+            })
     }
 
     async fn configure_switch(

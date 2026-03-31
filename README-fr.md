@@ -3,7 +3,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/Rust-1.75%2B-orange.svg)](https://www.rust-lang.org)
 [![MCP](https://img.shields.io/badge/MCP-stdio-green.svg)](https://modelcontextprotocol.io)
-[![Tools](https://img.shields.io/badge/Tools-19-blueviolet.svg)](#outils-disponibles-19)
+[![Tools](https://img.shields.io/badge/Tools-25-blueviolet.svg)](#outils-disponibles-25)
 [![Docker](https://img.shields.io/badge/Docker-~19%20MB-informational.svg)](#démarrage-rapide)
 
 **gns3-mcp** est un serveur MCP haute performance écrit en **Rust** qui expose l'**API REST GNS3 v2** à Claude, transformant votre assistant IA en un véritable ingénieur réseau -- capable de concevoir, déployer et administrer des topologies complexes via une simple conversation.
@@ -26,8 +26,9 @@ Vous et Claude travaillez sur le même projet GNS3 simultanément : vous ajustez
 ## Points forts
 
 - **Ultra-léger** : image Docker de ~19 Mo (`distroless/static`, binaire musl statique).
-- **19 outils MCP** : CRUD complet pour projets, nœuds, liens, templates, serveurs de calcul, plus des opérations en lot et composites.
-- **Résilient** : retry automatique avec backoff exponentiel sur les erreurs 5xx (3 tentatives, 100/200/400 ms).
+- **25 outils MCP** : CRUD complet pour projets, nœuds, liens, templates, serveurs de calcul, plus des opérations en lot et composites.
+- **Résilient** : retry automatique avec backoff exponentiel sur les erreurs 5xx (3 tentatives, 100/200/400 ms), circuit breaker pour les pannes serveur.
+- **Circuit breaker** : circuit breaker async trois etats (Closed/Open/Half-Open) qui empeche les tempetes de requetes quand GNS3 est indisponible.
 - **Sécurisé nativement** : zéro dépendance OpenSSL/glibc (rustls), validation des UUIDs sur chaque entrée, credentials jamais loggés, conteneur non-root.
 - **Architecture propre** : workspace Rust en 3 crates avec inversion de dépendance stricte et injection par trait.
 - **Zéro friction** : transport stdio -- intégration native Claude Desktop et Claude Code, aucune infrastructure supplémentaire.
@@ -80,6 +81,8 @@ docker run --rm -i \
   gns3-mcp:latest
 ```
 
+> **Note** : `--network host` est requis pour que le conteneur atteigne GNS3 sur `localhost`. Sur macOS/Windows Docker Desktop, utilisez `-e GNS3_URL=http://host.docker.internal:3080` a la place.
+
 ### Option 2 : Compilation depuis les sources
 
 ```bash
@@ -128,7 +131,7 @@ Les credentials utilisent le pass-through Docker (`-e VAR` sans `=valeur`). Déf
 
 ---
 
-## Outils disponibles (19)
+## Outils disponibles (25)
 
 ### Projets
 
@@ -152,6 +155,8 @@ Les credentials utilisent le pass-through Docker (`-e VAR` sans `=valeur`). Déf
 | `gns3_start_node` | Démarre un nœud unique |
 | `gns3_stop_node` | Arrête un nœud unique |
 | `gns3_delete_node` | Supprime un nœud du projet |
+| `gns3_update_node` | Met a jour le nom, le compute ou les proprietes d'un noeud |
+| `gns3_configure_switch` | Configure le mapping des ports d'un switch (VLANs, trunks) |
 | `gns3_start_all_nodes` | Démarre tous les nœuds du projet en une seule opération |
 | `gns3_stop_all_nodes` | Arrête tous les nœuds du projet en une seule opération |
 
@@ -168,6 +173,25 @@ Les credentials utilisent le pass-through Docker (`-e VAR` sans `=valeur`). Déf
 | Outil | Ce qu'il fait |
 |---|---|
 | `gns3_list_computes` | Liste les serveurs de calcul avec utilisation CPU/mémoire |
+
+### Templates
+
+| Outil | Ce qu'il fait |
+|---|---|
+| `gns3_update_template` | Met a jour les proprietes d'un template (RAM, interfaces, image) |
+
+### Dessins
+
+| Outil | Ce qu'il fait |
+|---|---|
+| `gns3_add_drawing` | Ajoute un dessin SVG sur le canvas du projet |
+
+### Snapshots & Export
+
+| Outil | Ce qu'il fait |
+|---|---|
+| `gns3_export_project` | Exporte un projet sous forme d'archive portable |
+| `gns3_snapshot_project` | Cree un snapshot nomme pour le rollback |
 
 ### Workflow typique
 
@@ -187,6 +211,7 @@ Les credentials utilisent le pass-through Docker (`-e VAR` sans `=valeur`). Déf
 ## Résilience
 
 - **Retry sur 5xx** : backoff exponentiel (100 ms, 200 ms, 400 ms), jusqu'à 3 tentatives. Les erreurs 4xx et les erreurs réseau échouent immédiatement -- aucun temps perdu sur des requêtes incorrectes.
+- **Circuit breaker** : arrete automatiquement les appels GNS3 apres 5 echecs consecutifs. Recuperation apres 30 s avec une requete sonde -- protege le serveur pendant les pannes.
 - **Timeout configurable** : variable `GNS3_TIMEOUT_SECS`, défaut 30 s.
 - **Erreurs actionnables** : chaque erreur retournée à Claude explique ce qui a échoué et suggère l'étape suivante.
 
@@ -208,7 +233,7 @@ Les credentials utilisent le pass-through Docker (`-e VAR` sans `=valeur`). Déf
 
 ```bash
 cargo check --workspace                    # vérification des types
-cargo test --workspace                     # 39 tests unitaires, aucun serveur GNS3 requis
+cargo test --workspace                     # 61+ tests unitaires, aucun serveur GNS3 requis
 cargo clippy --workspace -- -D warnings    # lint (politique zéro avertissement)
 cargo fmt --check                          # vérification du formatage
 ```
@@ -246,6 +271,18 @@ La justification des choix de conception est documentée dans `docs/adr/` :
 | 0002 | **Alpine + distroless** -- binaire musl statique, image finale ~19 Mo |
 | 0003 | **rustls plutôt qu'OpenSSL** -- aucune friction glibc pour la cross-compilation musl |
 | 0004 | **Trait Gns3Api dans core** -- découple le serveur du client, active les tests avec mock |
+| 0005 | **Circuit breaker** -- fail-fast sur pannes serveur, auto-recuperation |
+| 0006 | **Erreurs non-exhaustives** -- evolution semver-safe des enums d'erreur |
+
+---
+
+## Contribuer
+
+Voir [CONTRIBUTING.md](CONTRIBUTING.md) pour la mise en place du developpement et les conventions.
+
+## Securite
+
+Voir [SECURITY.md](SECURITY.md) pour notre politique de divulgation des vulnerabilites.
 
 ---
 

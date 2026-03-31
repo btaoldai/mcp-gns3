@@ -20,6 +20,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+* Circuit breaker wired into `gns3-client`: all outbound calls now go through a
+  three-state circuit breaker (`Closed → Open → Half-Open`) that fails fast
+  after 5 consecutive failures and auto-recovers after 30s
 * `crates/core/src/circuit_breaker.rs`: async three-state circuit breaker
   (`Closed → Open → Half-Open`) with configurable failure threshold and
   recovery timeout
